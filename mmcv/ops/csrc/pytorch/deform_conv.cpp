@@ -142,6 +142,7 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
                          int kH, int dW, int dH, int padW, int padH,
                          int dilationW, int dilationH, int group,
                          int deformable_group, int im2col_step) {
+   //计算前，进行各种检查和维度的修改
   if (input.device().is_cuda()) {
 #ifdef MMCV_WITH_CUDA
     CHECK_CUDA_INPUT(input);
@@ -190,6 +191,7 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
 
   TORCH_CHECK((offset.size(0) == batchSize), "invalid batch size of offset");
 
+  //im2col_step啥意思？
   output = output.view({batchSize / im2col_step, im2col_step, nOutputPlane,
                         outputHeight, outputWidth});
   columns = at::zeros(
@@ -215,7 +217,9 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
       {output_buffer.size(0), group, output_buffer.size(1) / group,
        output_buffer.size(2), output_buffer.size(3)});
 
+  //开始计算
   for (int elt = 0; elt < batchSize / im2col_step; elt++) {
+    //完成im2col，将形变卷积核在input上对应位置的元素，放到一个像素的不同channel里
     deformable_im2col_impl(input[elt], offset[elt], nInputPlane, inputHeight,
                            inputWidth, kH, kW, padH, padW, dH, dW, dilationH,
                            dilationW, im2col_step, deformable_group, columns);
@@ -223,7 +227,8 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
     columns = columns.view({group, columns.size(0) / group, columns.size(1)});
     weight = weight.view({group, weight.size(0) / group, weight.size(1),
                           weight.size(2), weight.size(3)});
-
+    
+    //columns和weight逐个做点乘，完成卷积
     for (int g = 0; g < group; g++) {
       output_buffer[elt][g] = output_buffer[elt][g]
                                   .flatten(1)
@@ -243,9 +248,9 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
   output_buffer = output_buffer.view({batchSize / im2col_step, nOutputPlane,
                                       im2col_step, outputHeight, outputWidth});
   output_buffer.transpose_(1, 2);
-  output.copy_(output_buffer);
+  output.copy_(output_buffer);  //将output_buffer复制到预先开辟的output中
   output = output.view({batchSize, nOutputPlane, outputHeight, outputWidth});
-
+  //恢复input和offset张量的shape
   input = input.view({batchSize, nInputPlane, inputHeight, inputWidth});
   offset = offset.view(
       {batchSize, deformable_group * 2 * kH * kW, outputHeight, outputWidth});
