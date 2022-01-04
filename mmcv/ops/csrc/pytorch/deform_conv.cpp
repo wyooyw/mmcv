@@ -41,7 +41,9 @@ void deformable_col2im_coord_impl(
                        pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w,
                        parallel_imgs, deformable_group, grad_offset);
 }
-
+/*
+    使用的宏：TORCH_CHECK,AT_ERROR
+*/
 void deform_conv_shape_check(at::Tensor input, at::Tensor offset,
                              at::Tensor *gradOutput, at::Tensor weight, int kH,
                              int kW, int dH, int dW, int padH, int padW,
@@ -136,7 +138,9 @@ void deform_conv_shape_check(at::Tensor input, at::Tensor offset,
         gradOutput->size(dimw));
   }
 }
-
+/*
+input:              [batch,channel,height,width] 输入特征图
+*/
 void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
                          Tensor output, Tensor columns, Tensor ones, int kW,
                          int kH, int dW, int dH, int padW, int padH,
@@ -212,26 +216,37 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
   Tensor output_buffer = at::zeros({batchSize / im2col_step, nOutputPlane,
                                     im2col_step * outputHeight, outputWidth},
                                    output.options());
-
+  
   output_buffer = output_buffer.view(
       {output_buffer.size(0), group, output_buffer.size(1) / group,
        output_buffer.size(2), output_buffer.size(3)});
 
+    //output_buffer:[batchSize / im2col_step, group, nOutputPlane/group, im2col_step * outputHeight, outputWidth]
   //开始计算
-  for (int elt = 0; elt < batchSize / im2col_step; elt++) {
+  for (int elt = 0; elt < batchSize / im2col_step; elt++) {//每次同时计算im2col_step个feature map
     //完成im2col，将形变卷积核在input上对应位置的元素，放到一个像素的不同channel里
     deformable_im2col_impl(input[elt], offset[elt], nInputPlane, inputHeight,
                            inputWidth, kH, kW, padH, padW, dH, dW, dilationH,
                            dilationW, im2col_step, deformable_group, columns);
-
+    //before:colums = [nInputPlane * kW * kH, im2col_step * outputHeight * outputWidth]
     columns = columns.view({group, columns.size(0) / group, columns.size(1)});
+    //after：colums = [group,nInputPlane * kW * kH / group, im2col_step * outputHeight * outputWidth]
+
+    //before:weight = [nOutputPlane,nInputPlane,kH,kW]
     weight = weight.view({group, weight.size(0) / group, weight.size(1),
                           weight.size(2), weight.size(3)});
+    //after:weight = [group,nOutputPlane/group,nInputPlane,kH,kW]
     
-    //columns和weight逐个做点乘，完成卷积
+    /*
+    设group=1
+    则weight.flatten(1) = [nOutputPlane,nInputPlane * kH * kW]
+    columns = [nInputPlane * kH * kW, im2col_step * outputHeight * outputWidth]
+    output = [nOutputPlane,im2col_step * outputHeight * outputWidth]
+    */
+    //分group做矩阵乘法
     for (int g = 0; g < group; g++) {
       output_buffer[elt][g] = output_buffer[elt][g]
-                                  .flatten(1)
+                                  .flatten(1)//保留第0个维度，将后边的维度展开
                                   .addmm_(weight[g].flatten(1), columns[g])
                                   .view_as(output_buffer[elt][g]);
     }
@@ -240,16 +255,16 @@ void deform_conv_forward(Tensor input, Tensor weight, Tensor offset,
     weight = weight.view({weight.size(0) * weight.size(1), weight.size(2),
                           weight.size(3), weight.size(4)});
   }
-
+  //合并group
   output_buffer = output_buffer.view(
       {output_buffer.size(0), output_buffer.size(1) * output_buffer.size(2),
        output_buffer.size(3), output_buffer.size(4)});
 
   output_buffer = output_buffer.view({batchSize / im2col_step, nOutputPlane,
                                       im2col_step, outputHeight, outputWidth});
-  output_buffer.transpose_(1, 2);
+  output_buffer.transpose_(1, 2);//换轴 [batchSize / im2col_step, im2col_step, nOutputPlane, outputHeight, outputWidth]
   output.copy_(output_buffer);  //将output_buffer复制到预先开辟的output中
-  output = output.view({batchSize, nOutputPlane, outputHeight, outputWidth});
+  output = output.view({batchSize, nOutputPlane, outputHeight, outputWidth});//合并im2col_step
   //恢复input和offset张量的shape
   input = input.view({batchSize, nInputPlane, inputHeight, inputWidth});
   offset = offset.view(

@@ -12,10 +12,12 @@ void deformable_im2col_cuda(Tensor data_im, Tensor data_offset,
                             Tensor data_col) {
   // num_axes should be smaller than block size
   // todo: check parallel_imgs is correctly passed in
+  //这俩变量的值，等于输出特征图的高宽？
   int height_col =
       (height + 2 * pad_h - (dilation_h * (ksize_h - 1) + 1)) / stride_h + 1;
   int width_col =
       (width + 2 * pad_w - (dilation_w * (ksize_w - 1) + 1)) / stride_w + 1;
+  //并行的线程数，每个线程处理：单通道的一个卷积核与单通道的一个feature map，卷积核不移动固定在一个位置
   int num_kernels = channels * height_col * width_col * parallel_imgs;
   int channel_per_deformable_group = channels / deformable_group;
 
@@ -24,8 +26,8 @@ void deformable_im2col_cuda(Tensor data_im, Tensor data_offset,
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
         scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
-
-        deformable_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels),
+        //这里是否有多个deformable_im2col_gpu_kernel函数在并行执行？
+        deformable_im2col_gpu_kernel<<<GET_BLOCKS(num_kernels), //申请Block数
                                        THREADS_PER_BLOCK, 0,
                                        at::cuda::getCurrentCUDAStream()>>>(
             num_kernels, data_im_, data_offset_, height, width, ksize_h,

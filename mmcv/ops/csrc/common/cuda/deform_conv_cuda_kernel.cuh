@@ -62,7 +62,9 @@
 
 // modified from
 // https://github.com/chengdazhi/Deformable-Convolution-V2-PyTorch/blob/mmdetection/mmdet/ops/dcn/src/deform_conv_cuda_kernel.cu
-
+/*
+  用到的宏：DEFORM_CONV_CUDA_KERNEL_CUH,MMCV_WITH_TRT,MMCV_USE_PARROTS
+*/
 #ifndef DEFORM_CONV_CUDA_KERNEL_CUH
 #define DEFORM_CONV_CUDA_KERNEL_CUH
 
@@ -77,6 +79,17 @@
 #endif  // MMCV_USE_PARROTS
 #endif  // MMCV_WITH_TRT
 
+/*
+input:          输入image
+data_width:     input一行的长度（这不就是width么，为什么要单写一个？）
+height:         input的高
+width:          input的宽
+h:              形变后的位置
+w:              形变后的位置
+*/
+/*
+  使用的外部宏：无
+*/
 template <typename T>
 __device__ T deformable_im2col_bilinear(const T *input, const int data_width,
                                         const int height, const int width, T h,
@@ -112,6 +125,9 @@ __device__ T deformable_im2col_bilinear(const T *input, const int data_width,
   return val;
 }
 
+/*
+  使用的外部宏：无
+*/
 template <typename T>
 __device__ T get_gradient_weight(T argmax_h, T argmax_w, const int h,
                                  const int w, const int height,
@@ -139,6 +155,9 @@ __device__ T get_gradient_weight(T argmax_h, T argmax_w, const int h,
   return weight;
 }
 
+/*
+  使用的外部宏：无
+*/
 template <typename T>
 __device__ T get_coordinate_weight(T argmax_h, T argmax_w, const int height,
                                    const int width, const T *im_data,
@@ -187,6 +206,33 @@ __device__ T get_coordinate_weight(T argmax_h, T argmax_w, const int height,
   return weight;
 }
 
+/*
+函数功能：计算im2col_step个feature map的im2col???
+  n:                              总线程数，等于channels * height_col * width_col * parallel_imgs
+  data_im:                        [im2col_step,channel,inputHeight,inputWidth] 输入特征图
+  data_offset:                   [im2col_step,new_channel,outputHeight, outputWidth] 
+                                  new_channel = deformable_group * 2 * kH * kW    2:x方向偏移和y方向偏移
+  height:                         输入特征图高度
+  width:                          输入特征图宽度
+  kernel_h:                       卷积核高度大小
+  kernel_w:                       卷积核宽度大小
+  pad_h:                          padding高度大小
+  pad_w:                          padding宽度大小
+  stride_h:                       步长高度大小
+  stride_w:                       步长宽度大小
+  dilation_h：                    空洞高度大小
+  dilation_w：                    空洞宽度大小
+  channel_per_deformable_group：  num_channels/deformable_group
+  batch_size:                     批次大小,实际上并不是真正的batch_size，这里其实是等于im2col_step，是取了一些图片出来
+  num_channels:                   通道数
+  deformable_group：              ?
+  height_col:                     ? 其值等于输出特征图的高度
+  width_col:                      ? 其值等于输出特征图的宽度
+  data_col:                       [nInputPlane * kH * kW, im2col_step * outputHeight * outputWidth] 存放生成的col格式的张量。（维度内的顺序，与乘法顺序相同）
+*/
+/*
+  使用的外部宏：CUDA_1D_KERNEL_LOOP
+*/
 template <typename T>
 __global__ void deformable_im2col_gpu_kernel(
     const int n, const T *data_im, const T *data_offset, const int height,
@@ -196,50 +242,67 @@ __global__ void deformable_im2col_gpu_kernel(
     const int channel_per_deformable_group, const int batch_size,
     const int num_channels, const int deformable_group, const int height_col,
     const int width_col, T *data_col) {
+    //循环多少次？？
   CUDA_1D_KERNEL_LOOP(index, n) {
+    //每次循环完成：单通道的一个卷积核与单通道的一个feature map，卷积核不移动固定在一个位置，计算im2col
+    //index为当前线程号？
     // index index of output matrix
-    const int w_col = index % width_col;
-    const int h_col = (index / width_col) % height_col;
-    const int b_col = (index / width_col / height_col) % batch_size;
-    const int c_im = (index / width_col / height_col) / batch_size;
-    const int c_col = c_im * kernel_h * kernel_w;
+    const int w_col = index % width_col;//第几行
+    const int h_col = (index / width_col) % height_col;//第几列
+    const int b_col = (index / width_col / height_col) % batch_size;//第几个feature map
+    const int c_im = (index / width_col / height_col) / batch_size;//第几个channel
+    const int c_col = c_im * kernel_h * kernel_w;//当前要填的在data_col的第几行
 
     // compute deformable group index
     const int deformable_group_index = c_im / channel_per_deformable_group;
 
+    //卷积核形变前，在输入feature map的感受野的左上角？
     const int h_in = h_col * stride_h - pad_h;
     const int w_in = w_col * stride_w - pad_w;
+    //向data_col的哪里写
     T *data_col_ptr =
         data_col +
         ((c_col * batch_size + b_col) * height_col + h_col) * width_col + w_col;
+    //c_col * batch_size * height_col * width_col + b_col * height_col * width_col + h_col * width_col + w_col
+    //指向当前channel
     const T *data_im_ptr =
         data_im + (b_col * num_channels + c_im) * height * width;
+    //
     const T *data_offset_ptr =
         data_offset + (b_col * deformable_group + deformable_group_index) * 2 *
                           kernel_h * kernel_w * height_col * width_col;
 
+    //遍历卷积核一个channel的每个元素
     for (int i = 0; i < kernel_h; ++i) {
       for (int j = 0; j < kernel_w; ++j) {
+        //形变偏移量在data_offset_ptr中的指针
         const int data_offset_h_ptr =
             ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col + w_col;
         const int data_offset_w_ptr =
             ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col +
             w_col;
+        //形变的偏移量
         const T offset_h = data_offset_ptr[data_offset_h_ptr];
         const T offset_w = data_offset_ptr[data_offset_w_ptr];
+        
         T val = static_cast<T>(0);
+        //h_im和w_im为形变后的位置
         const T h_im = h_in + i * dilation_h + offset_h;
         const T w_im = w_in + j * dilation_w + offset_w;
         if (h_im > -1 && w_im > -1 && h_im < height && w_im < width)
           val = deformable_im2col_bilinear(data_im_ptr, width, height, width,
                                            h_im, w_im);
         *data_col_ptr = val;
-        data_col_ptr += batch_size * height_col * width_col;
+        data_col_ptr += batch_size * height_col * width_col;//跳到下一行
       }
     }
   }
 }
 
+/*
+  使用的外部宏：CUDA_1D_KERNEL_LOOP
+  使用的外部函数：atomicAdd
+*/
 template <typename T>
 __global__ void deformable_col2im_gpu_kernel(
     const int n, const T *data_col, const T *data_offset, const int channels,
@@ -296,6 +359,9 @@ __global__ void deformable_col2im_gpu_kernel(
   }
 }
 
+/*
+  使用的外部宏：CUDA_1D_KERNEL_LOOP
+*/
 template <typename T>
 __global__ void deformable_col2im_coord_gpu_kernel(
     const int n, const T *data_col, const T *data_im, const T *data_offset,
